@@ -1,0 +1,14 @@
+<fieldset>
+    {% if self.heading %}
+        <legend class="w-sr-only">{{ self.heading }}</legend>
+    {% endif %}
+    <div class="{{ self.classname }}">
+    {% for translation in self.instance.get_translations %}
+    <li><a href="{% url 'wagtailadmin_pages:edit' translation.id %}">{{ translation.locale.language_name_local }} - {{ translation.title }}</a></li>
+    {% empty %}
+    {% if self.instance.id %}
+    <a href="{% url 'simple_translation:submit_page_translation' self.instance.id %}">Add New Translation</a>
+    {% endif %}
+    {% endfor %}
+    </div>
+</fieldset>

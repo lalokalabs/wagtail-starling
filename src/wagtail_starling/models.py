@@ -6,9 +6,11 @@
 from django.db import models
 from django.http import Http404
 from django.utils.text import slugify
-from wagtail.models import TranslatableMixin
+from wagtail.models import TranslatableMixin, Page
 from wagtail.snippets.models import register_snippet
-from wagtail.admin.panels import FieldPanel
+from wagtail.admin.panels import FieldPanel, MultiFieldPanel
+from wagtail.search import index
+from wagtail.images.models import Image
 
 
 @register_snippet
@@ -59,7 +61,12 @@ class Category(TranslatableMixin, models.Model):
 
 
 class CategoryMixin(models.Model):
-    """Mixin to add category field to any model"""
+    """
+    Mixin to add category field to any model.
+
+    For Wagtail Page models, this automatically modifies URLs to include
+    the category slug when a category is assigned.
+    """
 
     category = models.ForeignKey(
         "wagtail_starling.Category",
@@ -70,6 +77,38 @@ class CategoryMixin(models.Model):
 
     class Meta:
         abstract = True
+
+    def get_url_parts(self, request=None):
+        """
+        Override to return category-based URL when category is set.
+
+        Returns URL parts for pages with category as /category-slug/page-slug/
+        or /locale-prefix/category-slug/page-slug/ (preserving language prefix).
+
+        Only applies to Wagtail Page models. Non-Page models will not have this method.
+        """
+        # Check if this is a Wagtail Page (has get_url_parts from parent)
+        if not hasattr(super(), 'get_url_parts'):
+            raise AttributeError(
+                f"{self.__class__.__name__} does not inherit from Wagtail Page. "
+                "CategoryMixin.get_url_parts() only works with Page models."
+            )
+
+        url_parts = super().get_url_parts(request=request)
+
+        if url_parts is None:
+            return None
+
+        site_id, root_url, page_path = url_parts
+
+        if self.category:
+            parts = page_path.rstrip("/").split("/")
+            # Only insert category slug if it's not already there
+            if len(parts) >= 2 and self.category.slug not in parts:
+                parts.insert(-1, self.category.slug)
+                page_path = "/".join(parts) + "/"
+
+        return (site_id, root_url, page_path)
 
 
 class CategoryRoutingMixin:
@@ -251,3 +290,199 @@ class CategoryRoutingMixin:
         template = select_template(template_names)
         return template.template.name
 
+
+
+class BaseArticlePage(Page):
+    """
+    Abstract base class for article/blog pages.
+
+    Provides common fields for articles including SEO, featured images,
+    and excerpt. Projects should inherit from this and add their own
+    content fields and mixins.
+
+    Example:
+        # Without category support
+        class ArticlePage(BaseArticlePage):
+            body = StreamField([...])
+            author = ForeignKey('people.Author', ...)
+
+        # With category support
+        class ArticlePage(CategoryMixin, BaseArticlePage):
+            body = StreamField([...])
+    """
+
+    # Short description for listings and SEO
+    excerpt = models.TextField(
+        blank=True,
+        max_length=500,
+        help_text="Brief description for listings and SEO"
+    )
+
+    # SEO fields
+    meta_description = models.CharField(
+        max_length=160,
+        blank=True,
+        help_text="SEO meta description (recommended: 150-160 characters)",
+    )
+    featured_image = models.ForeignKey(
+        Image,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Featured image for hero and social sharing",
+    )
+    og_image = models.ForeignKey(
+        Image,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Open Graph image for social sharing (optional, uses featured_image if not set)",
+    )
+    canonical_url = models.URLField(
+        blank=True,
+        help_text="Canonical URL if this content was originally published elsewhere",
+    )
+
+    promote_panels = Page.promote_panels + [
+        MultiFieldPanel(
+            [
+                FieldPanel("meta_description"),
+                FieldPanel("featured_image"),
+                FieldPanel("og_image"),
+                FieldPanel("canonical_url"),
+            ],
+            heading="SEO and Social Media",
+        ),
+    ]
+
+    search_fields = Page.search_fields + [
+        index.SearchField("excerpt"),
+        index.SearchField("meta_description"),
+    ]
+
+    class Meta:
+        abstract = True
+
+    def get_meta_description(self):
+        """Get meta description with fallback to excerpt"""
+        return self.meta_description or self.excerpt or self.title
+
+    def get_og_image(self):
+        """Get Open Graph image with fallback to featured image"""
+        return self.og_image or self.featured_image
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to preserve slug when translating pages.
+        This prevents non-ASCII titles from auto-generating non-ASCII slugs.
+        """
+        # Check if this is a translation (has translation_key but is being created)
+        if self.translation_key and not self.id:
+            # Find the source page with the same translation_key
+            source_page = (
+                self.__class__.objects.filter(translation_key=self.translation_key)
+                .exclude(locale=self.locale)
+                .first()
+            )
+            if source_page and source_page.get_parent() != self.get_parent():
+                # Only preserve slug if pages have different parents
+                self.slug = source_page.slug
+
+        super().save(*args, **kwargs)
+
+
+
+class BaseArticleIndexPage(CategoryRoutingMixin, Page):
+    """
+    Abstract base class for article/blog index pages.
+
+    NOTE: When using this class, you must also inherit from RoutablePageMixin:
+        from wagtail.contrib.routable_page.models import RoutablePageMixin
+
+        class ArticleIndexPage(BaseArticleIndexPage, RoutablePageMixin):
+            ...
+
+    Provides:
+    - Category-based routing (inherited from CategoryRoutingMixin)
+    - Article listing with pagination
+    - Category filter display
+    - Slug preservation for translations
+
+    Projects must:
+    - Inherit from this class
+    - Optionally override get_article_model() to specify article page type
+    - Add content panels for any custom fields
+
+    Example:
+        class ArticleIndexPage(BaseArticleIndexPage):
+            intro = models.CharField(max_length=250)
+
+            content_panels = Page.content_panels + [
+                FieldPanel("intro"),
+            ]
+
+            def get_article_model(self):
+                from myapp.models import ArticlePage
+                return ArticlePage
+    """
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to preserve slug when translating pages.
+        This prevents non-ASCII titles from auto-generating non-ASCII slugs.
+        """
+        if self.translation_key and not self.id:
+            source_page = (
+                self.__class__.objects.filter(translation_key=self.translation_key)
+                .exclude(locale=self.locale)
+                .first()
+            )
+            if source_page and source_page.get_parent() != self.get_parent():
+                self.slug = source_page.slug
+
+        super().save(*args, **kwargs)
+
+    def get_context(self, request):
+        """
+        Add articles and categories to context with pagination.
+        """
+        from django.conf import settings
+        from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+        context = super().get_context(request)
+        language = request.LANGUAGE_CODE
+        ArticleModel = self.get_article_model()
+
+        # Get all live articles in current language
+        articles = (
+            ArticleModel.objects.live()
+            .filter(locale__language_code=language)
+            .order_by("-first_published_at", "-id")
+        )
+
+        # Get categories for filter display
+        categories = Category.objects.filter(
+            locale__language_code=language
+        ).order_by("name")
+
+        # Paginate articles
+        per_page = getattr(settings, 'ARTICLES_PER_PAGE', 10)
+        paginator = Paginator(articles, per_page)
+        page = request.GET.get("page")
+
+        try:
+            articles = paginator.page(page)
+        except PageNotAnInteger:
+            articles = paginator.page(1)
+        except EmptyPage:
+            articles = paginator.page(paginator.num_pages)
+
+        context["articles"] = articles
+        context["categories"] = categories
+
+        return context

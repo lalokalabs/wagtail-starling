@@ -8,9 +8,10 @@ from django.http import Http404
 from django.utils.text import slugify
 from wagtail.models import TranslatableMixin, Page
 from wagtail.snippets.models import register_snippet
-from wagtail.admin.panels import FieldPanel, MultiFieldPanel
+from wagtail.admin.panels import FieldPanel, MultiFieldPanel, PageChooserPanel
 from wagtail.search import index
 from wagtail.images.models import Image
+from wagtail.contrib.settings.models import BaseSiteSetting, register_setting
 
 
 @register_snippet
@@ -486,3 +487,117 @@ class BaseArticleIndexPage(CategoryRoutingMixin, Page):
         context["categories"] = categories
 
         return context
+
+
+@register_setting
+class AnalyticsSettings(BaseSiteSetting):
+    """
+    Analytics settings for Google Analytics, Matomo, or other analytics services.
+
+    Allows admin to:
+    - Configure analytics tracking code (head and body)
+    - Enable/disable analytics globally
+    - Include analytics on all pages by default
+    - Exclude specific pages from analytics
+    - Include analytics only on specific pages
+    """
+
+    id = models.BigAutoField(primary_key=True)
+
+    INCLUSION_ALL = 'all'
+    INCLUSION_SPECIFIC = 'specific'
+    INCLUSION_EXCLUDE = 'exclude'
+
+    INCLUSION_CHOICES = [
+        (INCLUSION_ALL, 'Include on all pages (default)'),
+        (INCLUSION_SPECIFIC, 'Include only on specific pages'),
+        (INCLUSION_EXCLUDE, 'Include on all pages except specific pages'),
+    ]
+
+    # Global enable/disable
+    enabled = models.BooleanField(
+        default=False,
+        help_text="Enable analytics tracking across the site"
+    )
+
+    # Analytics code
+    head_tracking_code = models.TextField(
+        blank=True,
+        help_text="Analytics tracking code to insert in <head> section (e.g., Google Analytics, Matomo). Include <script> tags."
+    )
+
+    body_tracking_code = models.TextField(
+        blank=True,
+        help_text="Analytics tracking code to insert at the end of <body> section (e.g., Google Tag Manager noscript). Include <noscript> or <script> tags."
+    )
+
+    # Inclusion mode
+    inclusion_mode = models.CharField(
+        max_length=20,
+        choices=INCLUSION_CHOICES,
+        default=INCLUSION_ALL,
+        help_text="Control which pages include analytics"
+    )
+
+    # Page selection for specific/exclude modes
+    included_pages = models.ManyToManyField(
+        Page,
+        blank=True,
+        related_name='analytics_included',
+        help_text="Pages to include analytics on (when 'Include only on specific pages' is selected)"
+    )
+
+    excluded_pages = models.ManyToManyField(
+        Page,
+        blank=True,
+        related_name='analytics_excluded',
+        help_text="Pages to exclude from analytics (when 'Include on all pages except specific pages' is selected)"
+    )
+
+    panels = [
+        FieldPanel('enabled'),
+        MultiFieldPanel(
+            [
+                FieldPanel('head_tracking_code'),
+                FieldPanel('body_tracking_code'),
+            ],
+            heading="Analytics Tracking Code",
+        ),
+        MultiFieldPanel(
+            [
+                FieldPanel('inclusion_mode'),
+                PageChooserPanel('included_pages'),
+                PageChooserPanel('excluded_pages'),
+            ],
+            heading="Page Inclusion Rules",
+        ),
+    ]
+
+    class Meta:
+        verbose_name = "Analytics Settings"
+
+    def should_include_analytics(self, page):
+        """
+        Determine if analytics should be included on the given page.
+
+        Args:
+            page: Wagtail Page instance
+
+        Returns:
+            bool: True if analytics should be included, False otherwise
+        """
+        if not self.enabled:
+            return False
+
+        if self.inclusion_mode == self.INCLUSION_ALL:
+            return True
+
+        if self.inclusion_mode == self.INCLUSION_SPECIFIC:
+            # Check if page is in included_pages
+            return self.included_pages.filter(id=page.id).exists()
+
+        if self.inclusion_mode == self.INCLUSION_EXCLUDE:
+            # Check if page is NOT in excluded_pages
+            return not self.excluded_pages.filter(id=page.id).exists()
+
+        return False

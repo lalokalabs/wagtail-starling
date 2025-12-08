@@ -16,9 +16,25 @@ from wagtail.contrib.settings.models import BaseSiteSetting, register_setting
 
 @register_snippet
 class Category(TranslatableMixin, models.Model):
-    """Category snippet for organizing content"""
+    """
+    Category snippet for organizing content.
 
-    id = models.BigAutoField(primary_key=True)
+    NOTE: Do not explicitly define `id = models.BigAutoField(primary_key=True)`.
+    When you explicitly define the primary key field, Django sets auto_created=False,
+    which causes Wagtail's copy_for_translation to include the id in the copied data.
+    This makes Django UPDATE the existing object instead of creating a new one.
+
+    By letting Django auto-create the primary key, it sets auto_created=True,
+    which Wagtail's _extract_field_data() properly excludes from the copy.
+
+    WORKAROUND: If you must explicitly define the id field, you can override
+    copy_for_translation to exclude it:
+
+        def copy_for_translation(self, locale, exclude_fields=None):
+            exclude_fields = (exclude_fields or []) + ['id']
+            return super().copy_for_translation(locale, exclude_fields=exclude_fields)
+    """
+
     name = models.CharField(max_length=255, db_index=True)
     slug = models.SlugField(max_length=255)
     description = models.TextField(blank=True)
